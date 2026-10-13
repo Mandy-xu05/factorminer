@@ -87,9 +87,23 @@ class ResearchActionService:
                     path.unlink()
 
     def library_utility(self) -> float:
+        """Excess quality of the library: the planner's gain signal.
+
+        Under marginal admission each factor counts the partial IC it added
+        when admitted (beyond the reference basis and the library then);
+        otherwise its paper IC beyond the IC threshold.
+        """
+        factors = self.loop.library.list_factors()
+        pipeline = getattr(self.loop, "pipeline", None)
+        if getattr(pipeline, "marginal_basis", None) is not None:
+            floor = pipeline.marginal_config.min_partial_ic
+            return float(sum(
+                max(abs(finite_float((f.research_metrics or {}).get("marginal", {})
+                                     .get("partial_ic"))) - floor, 0)
+                for f in factors
+            ))
         threshold = self.loop.settings.ic_threshold
-        return float(sum(max(finite_float(f.ic_paper_mean) - threshold, 0)
-                         for f in self.loop.library.list_factors()))
+        return float(sum(max(finite_float(f.ic_paper_mean) - threshold, 0) for f in factors))
 
     def prepare(self, payload: Any) -> str:
         records = self.ledger.records()
@@ -251,10 +265,20 @@ class ResearchActionService:
         for formula in (action["parent_formula"], action["formula"]):
             self._contact("delay_challenge", formula, payload.iteration, "dispatched")
             self.evaluations += 1
-            _, signals = kernel.compute_signals(
-                formula=formula, data_dict=data, returns_shape=self.loop.returns.shape,
-                signal_failure_policy="raise",
-            )
+            try:
+                _, signals = kernel.compute_signals(
+                    formula=formula, data_dict=data, returns_shape=self.loop.returns.shape,
+                    signal_failure_policy="raise",
+                )
+            except Exception as exc:  # noqa: BLE001 - recorded as an inconclusive challenge
+                # An evaluation failure (e.g. a full GPU) is not evidence about
+                # retention; record it rather than abort the campaign.
+                payload.stage_metrics["research_challenge"] = {
+                    "parent_formula": action["parent_formula"], "formula": action["formula"],
+                    "status": "inconclusive", "admission_changed": False,
+                    "reason": f"Signal computation failed: {type(exc).__name__}: {exc}"[:500],
+                }
+                return
             panels.append(signals)
         parent, delayed = panels
         mask = np.isfinite(parent) & np.isfinite(delayed) & np.isfinite(self.loop.returns)
