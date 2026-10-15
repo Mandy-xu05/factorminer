@@ -15,13 +15,11 @@ Run in an environment with ``pandas`` and ``pyarrow``::
   income / revenue), ``yoy_ni`` and ``yoy_rev`` (year-on-year net-income and
   revenue growth, %), ``cfo_to_book`` (operating cash flow per share / book
   value per share);
-* ``ind_return``: the equal-weight mean daily return of the stock's
-  Eastmoney industry among all panel stocks trading that day (current and
-  past index members; groups with fewer than five stocks are left NaN). The
-  industry is the one of the stock's latest report, and before its first
-  labelled report the earliest known label: industries are nearly static, so
-  this small classification look-ahead fills the early years, where a third
-  of reports carry no label.
+* ``ind_return``: the equal-weight mean daily return of the other index
+  members in the stock's Eastmoney industry that day (leave-one-out; NaN with
+  fewer than three peers). The industry is the one of the stock's latest
+  report; before its first labelled report it is unknown. Peers are that
+  day's members only, never stocks selected by later membership.
 
 ``--factors-out`` writes, for universe-member rows, a fixed set of standard
 data features ranked cross-sectionally to [-1, 1] (``datetime, instrument,
@@ -43,7 +41,7 @@ import numpy as np
 import pandas as pd
 
 QUARTERLY = ["roe", "gp_margin", "np_margin", "yoy_ni", "yoy_rev", "cfo_to_book"]
-MIN_GROUP = 5
+MIN_PEERS = 3
 
 
 def _quarterly(directory: Path, dates: pd.DatetimeIndex) -> pd.DataFrame:
@@ -63,8 +61,12 @@ def _quarterly(directory: Path, dates: pd.DatetimeIndex) -> pd.DataFrame:
     position = dates.searchsorted(q["pub"].to_numpy(), side="right")
     q = q[position < len(dates)].assign(datetime=dates[position[position < len(dates)]])
     # Several reports on one day (e.g. annual + Q1 in late April): the newest statement wins.
-    return (q.sort_values(["asset_id", "datetime", "stat"]).drop_duplicates(["asset_id", "datetime"], keep="last")
-            .drop(columns=["pub", "stat", "roe_prior"]))
+    q = (q.sort_values(["asset_id", "datetime", "stat"]).drop_duplicates(["asset_id", "datetime"], keep="last")
+         .drop(columns=["pub", "stat", "roe_prior"]))
+    # A field a report leaves blank keeps the asset's last published value.
+    fields = [*QUARTERLY, "roe_yoy", "industry"]
+    q[fields] = q.groupby("asset_id")[fields].ffill()
+    return q
 
 
 def _cs_rank(frame: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
@@ -79,6 +81,9 @@ def main() -> None:
                         help="directory with fetch_em_fundamentals.py's quarterly.parquet")
     parser.add_argument("--panel-out", type=Path, default=None)
     parser.add_argument("--factors-out", type=Path, default=None)
+    parser.add_argument("--industry-out", type=Path, default=None,
+                        help="parquet of (datetime, instrument, industry) for index members: the Eastmoney "
+                             "industry of the latest report published before each day")
     args = parser.parse_args()
 
     panel = pd.read_parquet(args.panel)
@@ -86,22 +91,40 @@ def main() -> None:
     panel = panel.sort_values(["asset_id", "datetime"]).reset_index(drop=True)
     dates = pd.DatetimeIndex(np.sort(panel["datetime"].unique()))
     by_asset = panel.groupby("asset_id")
-    ret = by_asset["close"].pct_change(fill_method=None)
+    # A daily return only across consecutive sessions: after a suspension gap it spans several days.
+    previous = pd.Series(dates[np.maximum(dates.searchsorted(panel["datetime"]) - 1, 0)], index=panel.index)
+    ret = by_asset["close"].pct_change(fill_method=None).where(by_asset["datetime"].shift(1) == previous)
     panel["ret"] = ret
     added: list[str] = []
 
     have_q = args.fundamentals is not None and (args.fundamentals / "quarterly.parquet").exists()
     if have_q:
         q = _quarterly(args.fundamentals, dates)
-        panel = panel.merge(q, on=["asset_id", "datetime"], how="left")
-        fields = QUARTERLY + ["roe_yoy", "industry"]
-        panel[fields] = panel.groupby("asset_id")[fields].ffill()
-        panel["industry"] = panel.groupby("asset_id")["industry"].bfill()
+        # Backward as-of per asset: a report effective on a suspended day applies from the next row.
+        panel = pd.merge_asof(panel.sort_values("datetime"), q.sort_values("datetime"), on="datetime",
+                              by="asset_id", direction="backward")
+        panel = panel.sort_values(["asset_id", "datetime"]).reset_index(drop=True)
+        ret = panel["ret"]
         added += QUARTERLY + ["roe_yoy"]
+        member = (panel["in_universe"] == 1) & panel["ret"].notna()
         key = [panel["datetime"], panel["industry"]]
-        size = panel["ret"].notna().groupby(key).transform("sum")
-        panel["ind_return"] = panel["ret"].groupby(key).transform("mean").where(size >= MIN_GROUP)
+        total = panel["ret"].where(member).groupby(key).transform("sum")
+        count = member.groupby(key).transform("sum")
+        peers = count - member.astype(int)
+        own = panel["ret"].where(member, 0.0)
+        panel["ind_return"] = ((total - own) / peers).where(peers >= MIN_PEERS)
         added.append("ind_return")
+
+    if args.industry_out is not None:
+        if not have_q:
+            raise SystemExit("--industry-out needs --fundamentals")
+        ind = panel.loc[(panel["in_universe"] == 1) & panel["industry"].notna(),
+                        ["datetime", "asset_id", "industry"]].rename(columns={"asset_id": "instrument"})
+        args.industry_out.parent.mkdir(parents=True, exist_ok=True)
+        ind.to_parquet(args.industry_out, index=False)
+        covered = float(panel.loc[panel["in_universe"] == 1, "industry"].notna().mean())
+        print("industry", args.industry_out, len(ind), "industries", ind["industry"].nunique(),
+              "member coverage", round(covered, 3))
 
     if args.panel_out is not None:
         leaves = [c for c in added if c != "roe_yoy"]
@@ -140,11 +163,11 @@ def main() -> None:
         f["ivol20"] = resid.groupby(panel["asset_id"]).transform(lambda s: s.rolling(20, min_periods=15).std())
         f["st"] = panel["st"].astype(float)
         if have_q:
-            ind_ret = panel["ind_return"]
-            log_ind = np.log1p(ind_ret.fillna(0)).groupby(panel["asset_id"])
+            # Missing days stay missing: windows need most of their observations.
+            log_ind = np.log1p(panel["ind_return"]).groupby(panel["asset_id"])
             f["ind_mom20"] = log_ind.transform(lambda s: s.rolling(20, min_periods=15).sum())
-            ret5 = np.log1p(ret.fillna(0)).groupby(panel["asset_id"]).transform(lambda s: s.rolling(5).sum())
-            f["ind_rel_ret5"] = ret5 - log_ind.transform(lambda s: s.rolling(5).sum())
+            ret5 = np.log1p(ret).groupby(panel["asset_id"]).transform(lambda s: s.rolling(5, min_periods=4).sum())
+            f["ind_rel_ret5"] = ret5 - log_ind.transform(lambda s: s.rolling(5, min_periods=4).sum())
         if have_q:
             for c in QUARTERLY + ["roe_yoy"]:
                 f[c] = panel[c]

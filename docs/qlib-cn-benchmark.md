@@ -39,9 +39,20 @@ evaluated formulas, 500+ model fits.
   pairwise |t| < 1.5; campaign-to-campaign sd (0.0006–0.0019) matches the
   effect sizes.
 
-In progress: point-in-time fundamentals and industry features (Alpha158 +
-features fits; `+fq` mining campaigns), and training on 5- and 10-day labels
-to match the book's ~10-day holding period.
+- **Training on a 5-day label reaches the book.** With everything else
+  Qlib-default and seven seeds per book, `--horizon 5` raises the pooled
+  after-cost IR from 0.95 to 1.47 on CSI300, 0.43 to 1.06 on CSI500 and
+  −0.16 to 0.79 on CSI1000; pooled over the three universes the paired t is
+  3.8 and the IR gain 0.91 (90% CI 0.51–1.32). The 10-day label and a
+  validation-chosen horizon are weaker. This is the adopted model; the
+  prospective holdout from 2026-10-16 scores it against the 1-day incumbent.
+- **Seed sets matter as much as most ideas.** The three-seed default book
+  quoted at 1.26–1.29 is the best of the 35 three-seed subsets of seven
+  seeds (mean 1.05, sd 0.10). Books are now judged with seven seeds.
+
+Dead ends this round: industry-neutral scores, more trees or lower learning
+rates, bagging, refitting on train+validation, fundamentals features, a
+holding bonus for incumbents.
 
 ## Data
 
@@ -307,8 +318,23 @@ of it reaches the top-50 spread.
 
 ### Book evaluation
 
+**Tied scores.** Qlib's default LightGBM (learning rate 0.2, L1 206,
+loss-stopped at 8–64 trees) emits few distinct scores: about 92% of a day's
+names share their score with another. `TopkDropoutStrategy` sorts them in
+whatever order the index came in, which followed Python's per-process string
+hash, so the same predictions backtested to a wf2024 IR anywhere between
+0.64 and 0.96 across reruns. `_backtest` now breaks ties with a stable
+pseudo-random key (`_untie`), and `book_eval.py --tie-draws K` averages a
+book over K keys and reports the IR spread across draws. Every IR in the
+table below is a single draw from before the fix; the 16-draw re-evaluation
+is in `book_wf_ties.json`. A "holding bonus" for incumbents within ties or
+small percentile margins was tried and removed: TopkDropout only ever sells
+the `n_drop` lowest-ranked holdings against the five best new names, which
+sit far above any incumbent, so a bonus below about 0.5 of the daily range
+changes no decision and a larger one is `n_drop` by another name.
+
 Pooled 2018–2025 walk-forward. Baseline: tuned top-stopped LightGBM
-(`alpha158r_mtop_lgb`), 3 seeds.
+(`alpha158r_mtop_lgb`), 3 seeds. Single tie draw (see above).
 
 | Book (3 seeds unless noted) | After-cost IR | Excess/yr | Top-50 bps | RankIC | Excess diff t |
 | --- | --- | --- | --- | --- | --- |
@@ -334,6 +360,95 @@ Pooled 2018–2025 walk-forward. Baseline: tuned top-stopped LightGBM
   classic the gates lift RankIC (t 1.1–2.5) with top lift |t| < 1.
 - **Top-weighted MSE** (`topmse`), best on classic, did not replicate in
   walk-forward: top lift +0.13 bps (t 0.15).
+- **16 tie draws** (`book_wf_ties.json`): default processing 1.27 (draws
+  1.21–1.36) vs tuned top-stopped 0.96 (0.93–1.00), paired t 1.29, ΔIR 90%
+  CI [−0.27, 0.85], reality-check p 0.20. The pre-fix headline stands but is
+  not significant. Single default seeds score 0.92/1.13/1.08 with 22–27% of
+  names tied; the three-seed rank average (21% tied) reaches 1.27, so for
+  this model seed averaging does help, partly by resolving ties with
+  information rather than at random. The tuned model's single seed has no
+  ties and the same IR as its ensemble (1.02 vs 0.96).
+- **Seed count** (`book_wf_seedcount.json`, default 1-day model): seeds
+  0–2 give 1.26, seeds 0–4 1.01 (t −2.00 vs the 3-seed book), seeds 0–6
+  0.95 (t −2.27), seeds 3–6 alone 1.12. The three-seed incumbent is a
+  favourable seed draw. All 35 three-seed subsets of seven seeds
+  (`book_wf_seedsets.json`): mean 1.05, sd 0.10, range 0.79–1.27, and
+  seeds 0–2 are the best of the 35; single seeds average 0.98 (sd 0.08).
+  The expected default book is therefore about 1.05, not 1.27, and every
+  three-seed comparison in this table carries a seed-set sd of 0.10 on each
+  side.
+- **Seven-seed re-judgement of the horizon** (`book_csi300_h7b.json`,
+  `book_csi500_h7.json`, `book_csi1000_h7.json`; 4 tie draws). 1-day →
+  5-day label: CSI300 0.95 → 1.47 (paired t 1.93, ΔIR 90% CI [0.08, 0.96],
+  reality-check p 0.044), CSI500 0.43 → 1.06 (t 1.94, p 0.044), CSI1000
+  −0.16 → 0.79 (t 3.87). Day-averaged across the three universes: t 3.8 at
+  bandwidths 7, 20 and 60, ΔIR +0.91 (CI [0.51, 1.32]); the two seed halves
+  (0–2 and 3–6) agree (+0.92 and +0.80). The adoption survives the seed
+  correction; the 5-day book gains about 0.5 IR over a fairly seeded
+  incumbent on every universe.
+- **Tree count is not a lever under Qlib's parameters.** Fitted to 512
+  rounds with no early stopping, the default model (learning rate 0.2, L1
+  206) stops by itself when no split clears the penalty: 5 trees on wf2022,
+  under 64 on every window, so books from the first 64, 128, 256 or 512
+  trees are identical to the early-stopped one and 8 or 16 trees lose
+  slightly (`book_wf_trees.json`). Capacity comes from the preset
+  (`--lgb-config slow31`/`slow63`: lower rate, no or light L1, 165–300
+  trees), which is tested below.
+- **Label horizon** (`--horizon`, train on the 3/5/10-day forward return,
+  trade daily; `book_wf_horizon.json`, 4 tie draws): pooled IR h1 1.26, h3
+  1.07, h5 1.52 (paired t +0.72, reality-check p 0.41), h10 1.29, h5+h10
+  blend 1.41. Choosing the horizon on validation IR gives 1.04: validation
+  picked h10 for wf2024 (test −0.14) and h3 for wf2018. Not adopted; h5 is
+  up in three windows of four and is being replicated on CSI500.
+- **Replication of the horizon family on CSI500 and CSI1000** (36 fits
+  each, the hypothesis "h5 beats h1" fixed from the CSI300 result before
+  fitting). CSI500 (`book_csi500_horizon.json`): h1 0.45, h5 0.90 (t 1.29),
+  h10 0.90, h5+h10 1.06 (t 1.66, reality-check p 0.084). CSI1000
+  (`book_csi1000_horizon.json`): h1 −0.13, h5 0.93 (t 4.12, ΔIR 90% CI
+  [0.64, 1.54], reality-check p < 0.001), h10 0.47 (t 2.10). Pooled over
+  the three universes (`cross_universe.py`, day-averaged paired
+  differences): h5 vs h1 t 3.0 at bandwidths 7, 20 and 60, ΔIR +0.78 (CI
+  [0.35, 1.24]), positive in every universe; h10 t 1.5; validation-selected
+  horizon t 1.0. **The 5-day training label is the first change that
+  reaches the book**, and it is adopted as a fixed choice (`--horizon 5`,
+  default processing, 3 seeds), not as a validation-selected procedure,
+  because validation IR picked the wrong horizon in most windows. The gain
+  is not a capacity effect in disguise: the 5-day model does grow more trees
+  (tie share 0.21 → 0.10), but the `slow31`/`slow63` presets with 165–300
+  trees and no ties on the 1-day label gain nothing. Caveats:
+  on CSI300 alone t 0.72 and wf2024 loses 0.58 IR; the gain is in 2018–19
+  and 2022–23 on CSI300 and across all windows on CSI1000.
+- **Review-driven variants, 3 seeds** (`book_wf_review3.json`, vs default
+  1.26): refit on train+valid 0.73 (t −2.45, CI excludes 0), raw features
+  with rank label 0.77 (t −1.85), robust features with z label 1.28
+  (+0.19), top-stopped 0.96, top-stopped refit 0.77, with fundamentals
+  0.81 (t −1.93, CI excludes 0), fundamentals top-stopped 1.14. Nothing from
+  the review helps the book; refitting and the fundamentals features hurt.
+- **LightGBM presets with real capacity** (`book_wf_lgbcfg.json`, 3 seeds,
+  4 tie draws, vs default 1.26): `slow31` (rate 0.03, 31 leaves, no L1, ~300
+  trees) 1.21, `slow63` 1.20, their blend 1.20, validation-selected preset
+  1.21 (reality-check p 0.85); turning Qlib's row bagging on (`qlib_bag`,
+  seed 0) 0.86 (t −2.15, CI excludes 0). The five-to-forty-tree default is
+  not beaten by a model with ten times the trees.
+- **Robust processing under the 5-day label** (`book_wf_h5_robust.json`,
+  7 seeds, 4 draws): robust features with a rank label 1.20 vs default
+  processing 1.47 (t −1.38); their blend 1.35. Default processing stays:
+  the z-scored label's tails matter at 5 days as at 1.
+- **XGBoost, 7 seeds** (`book_wf_xgb7.json`, 4 draws): 1-day label 1.09
+  (LightGBM 0.95), 5-day label 1.52 (LightGBM 1.47, paired excess t −0.37),
+  blend of both 5-day learners 1.48. XGBoost adds nothing over LightGBM, but
+  the horizon effect replicates in a second learner (+0.43 IR), which is
+  further evidence that the gain belongs to the label, not the model.
+- **Reference models, seed 0, 1-day label** (`book_wf_reference_s0.json`,
+  4 tie draws, vs LightGBM seed 0 at 0.89): XGBoost 1.22 (t 0.94), CatBoost
+  0.94, MLP 0.85 (RankIC 0.041, the highest, yet no better book), ALSTM 0.26
+  (t −1.67). Single seeds carry a seed sd near 0.1, so XGBoost is the only
+  one worth a seven-seed follow-up; none approaches the 5-day LightGBM book
+  (1.47).
+- **Industry-neutral scores** (`--neutral`, Eastmoney industry of the latest
+  report, groups of five or more names demeaned): pooled IR 1.25 → 0.88 at
+  half weight and 0.60 at full weight. The book's sector tilts are part of
+  its return, not noise to remove.
 
 Univariate signal of the data features (2017–2025, 1-day label):
 - ep, bp, size, cfo_to_book and roe_yoy have RankIC t 4–5 but top-50 spread
@@ -416,7 +531,7 @@ $QPY -I scripts/qlib_cn/data_factors.py --panel panels/csi300_fund.parquet --fun
   --panel-out panels/csi300_fq --factors-out data_factors/csi300_fq.parquet
 
 # Reference matrix; any handler/model/objective/horizon via run_qlib_baselines.py
-scripts/qlib_cn/run_reference_matrix.sh $QPY qlib_cn output/qlib_cn
+QPY=$QPY PROVIDER=qlib_cn UNIVERSE=csi300 scripts/qlib_cn/fit_queue.sh scripts/qlib_cn/jobs/reference.txt
 
 # Campaign configs (arm = JSON override of the marginal template) and mining
 uv run python scripts/qlib_cn/make_campaigns.py --campaigns campaigns \
