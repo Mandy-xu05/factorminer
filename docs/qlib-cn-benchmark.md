@@ -46,6 +46,26 @@ evaluated formulas, 500+ model fits.
   3.8 and the IR gain 0.91 (90% CI 0.51–1.32). The 10-day label and a
   validation-chosen horizon are weaker. This is the adopted model; the
   prospective holdout from 2026-10-16 scores it against the 1-day incumbent.
+- **Round 3 (2026-10-16): faster loop, mechanism tests.** `fast_fit.py`
+  (bit-identical cached fits) and parallel `book_eval.py` make a
+  three-universe judgement 2–5 minutes. h5 survives every robustness check
+  (size exposure, realistic execution of suspended names, 32 seeds) and
+  replicates in direction on never-used 2012–2017 windows, with a smaller
+  relative gain. The survival-weighted label, GLS weights, seed counts above
+  7, no-trade bands, smoothing, fundamentals and mined libraries (re-exported
+  without a look-ahead) do not raise the book. More training data raises
+  RankIC everywhere but not the book: the model is far better at losers than
+  winners and a top-50 long-only book sees only the winners. Wider books in
+  the larger universes are the open lead.
+- **Round 4: the signal's shape changed in 2017.** Short-term reversal, the
+  main source of the score's top, lost its long side (CSI500 reversal RankIC
+  4–8% a year before 2017, ~1% after; recent losers no longer rebound, recent
+  winners still lag), consistent with buyers arbitraging the underpriced side
+  while short-sale limits protect the overpriced side. A broad exclusion book
+  that harvests the loser tail wins in 2018–2025 (size-adjusted ΔIR +0.90
+  pooled) and loses decisively in its registered 2012–2017 test (−2.19
+  [−2.80, −1.46]); the trailing shape does not predict the next window, so
+  the top-50 book stays.
 - **Seed sets matter as much as most ideas.** The three-seed default book
   quoted at 1.26–1.29 is the best of the 35 three-seed subsets of seven
   seeds (mean 1.05, sd 0.10). Books are now judged with seven seeds.
@@ -456,6 +476,210 @@ Univariate signal of the data features (2017–2025, 1-day label):
 - The industry-relative 5-day return (reversal) gives −2.5 bps (t −2.4) and
   20-day industry momentum +2.7 bps: these are the more book-relevant
   features.
+
+### Round 3: fast loop and mechanism tests
+
+**Loop.** `fast_fit.py` caches Alpha158 and the training labels once per
+universe and protocol start (one cache per start: Qlib's rolling std/corr
+round differently by load start, enough to move a LightGBM bin edge) and
+fits every window, label and seed in one process with Qlib's own processors.
+Refits are bit-identical to `run_qlib_baselines.py` (checked on h1/h5,
+raw/robust, three windows; `fast_fit.py fit --check RUN`). A 7-seed, 4-window
+family takes ~100 s instead of ~10 min; `book_eval.py --jobs` runs every
+(book, tie draw) backtest in forked workers sharing one Exchange (156 s →
+35 s); `family.sh` judges books in CSI300/500/1000 and pools them with
+`cross_universe.py`. A full three-universe judgement takes 2–5 minutes.
+
+Every test below is the adopted h5 book (7 seeds, default processing) against
+a single pre-specified challenger or grid, pooled over the three universes,
+4 tie draws (`output/qlib_cn/family/<tag>_*.json`).
+
+- **Survival-weighted label** (`ew90`). A name ranked on day t earns
+  Σ_k 1[held at t+k] r_{t+k}; the measured TopkDropout exit hazard is ~0.10
+  a day (mean holding 9.9–10.0 days), so the matched target is
+  Σ_{k≤20} 0.9^{k−1} r_{t+k}. Pooled t −0.76, ΔIR −0.05 [−0.32, 0.22]: up
+  in CSI300 (1.59 vs 1.47), down in CSI1000 (0.62 vs 0.80). The alpha-decay
+  profile (`book_diagnostics.py decay`) explains it: the CSI300 book's top-50
+  spread is 27 bps over days 1–5 and 25 bps over days 6–20, while CSI1000's
+  late lags are negative. The unbiased target adds more return noise than the
+  signal it recovers; h5 is the better bias–variance point.
+- **Size exposure.** Regressing each book's excess on equal-weight universe
+  minus index (`book_diagnostics.py size`): the EW-minus-index return is only
+  1.5–2.8%/yr, and h5 − h1 net of size is +4.7%/yr (t 2.16), +4.0%/yr
+  (t 1.50) and +8.9%/yr (t 3.29). The label gain is selection, not a small-cap
+  tilt.
+- **Seed count.** Nested books of 1/3/7/15/32 seeds: pooled IR 1.16, 1.39,
+  1.38, 1.35, 1.20 (k32 vs k7 t −1.7). Three disjoint 7-seed sets give
+  1.31–1.42 (seed noise ≈ 0.05 pooled). Averaging per-model percentile ranks
+  of heavily tied models is the cause: with z-score combining, k32 is 1.31
+  vs k7 1.36 (t −0.5). The ensemble saturates by ~7 seeds; rank averaging is
+  harmless at 7 but should not be used for large ensembles.
+- **Turnover.** `n_drop` 3/4/5/7: pooled 1.31/1.41/1.38/1.18; gross IR rises
+  with turnover and costs take it back. n_drop 5 is on the frontier.
+- **No-trade band** (`--band`, sell a holding once its rank falls below
+  B × 50, refill from the top): pooled 0.19–0.99 for B = 1.5–4, turnover not
+  even monotone in B. The scores re-rank sharply day to day; TopkDropout's
+  fixed daily count acts as the noise filter a band lacks.
+- **Score smoothing** under h5 (EMA half-life 1/2/4 days): pooled ΔIR −0.13,
+  −0.25, −0.31; even gross IR falls. The slow decay belongs to the current
+  score; older scores carry less.
+- **Suspended names.** Qlib's TopkDropout tries to buy top-ranked names that
+  are suspended on the trade day and leaves their slots in cash: 2.2% of the
+  CSI300 h5 book's daily top 50 and 8.5% of CSI1000's are suspended on the
+  signal day (the model ranks NaN-feature rows high), so the books hold 49.2
+  and 46.5 names with 2.5% and 8.7% cash. `book_eval.py --tradable`
+  (`only_tradable`: buy the next-ranked name, as a trader at the close would)
+  lowers IR slightly (CSI300 1.48 → 1.42, CSI1000 0.79 → 0.76); h5 vs h1
+  under it: pooled t 3.1, ΔIR +0.83 [0.37, 1.32]. New tests use `--tradable`.
+- **Fundamentals and valuation under h5** (CSI300, `csi300_fq3`, 20 PIT
+  features appended): 1.41 → 0.96 (t −2.25, ΔIR −0.45 [−0.76, −0.15]),
+  lower in every window, the same verdict as under h1.
+- **Inverse-variance (GLS) weights** (`fast_fit.py --weight invvar`,
+  1/σ²_20d): squared loss on z-scored returns is dominated by volatile names,
+  and GLS is the efficient estimator of the same mean. Pooled t −1.0, ΔIR
+  −0.10 [−0.48, 0.26]; RankIC lower in every universe. Rejected.
+
+- **Mined libraries under h5, without the export look-ahead.** Every
+  library export before 2026-10-15 17:17 had its rows masked by the future
+  return (fixed in `evaluate_library.py`, not re-run until now). Re-exported
+  (`<window>_{marginal,fq}_v2`; wf2024's control campaign never finished,
+  so the control arm is out) and appended to Alpha158 under h5, CSI300:
+  marginal 1.33, fq 1.09 vs 1.41 (t −0.33 and −1.68, reality-check p 0.77),
+  while RankIC rises from 0.0344 to 0.0375 for both. The old verdict was not
+  an artefact of the leak: RankIC lift still does not reach the book.
+- **Power.** One universe's 8 years give a 90% interval on ΔIR of about
+  ±0.35; pooled over three universes about ±0.25. A RankIC lift of 0.003 is
+  worth perhaps +0.05 IR: invisible here. More hill-climbing on these days is
+  mostly noise-chasing; more independent days are the lever.
+- **Earlier windows: out-of-sample replication of h5** (registered before any
+  fit, `docs/registrations/spec_h5_vs_h1_early.json`). CSI300 membership
+  starts 2005 and CSI500 2007, so walk-forward windows wf2012/2014/2016
+  (tests 2012–2017) were added; no h5-vs-h1 decision had used them. Result
+  (`output/qlib_cn/family/early_*`): CSI300 h1 2.83 → h5 3.06 (t 0.65),
+  CSI500 5.74 → 6.07 (t 0.81), pooled t 0.91, ΔIR +0.20 [−0.24, 0.65]:
+  positive in both universes, so it replicates by the registered rule, but
+  the relative gain (+6–8%) is far smaller than in 2018–2025 (+50% and more).
+  The early books are extraordinary in every year (CSI500 IR 4.4–7.6, ~40%/yr
+  excess, frictionless and without impact costs); every member has rows
+  (300/500 a day, delisted names included), so this is not survivorship but
+  a less efficient market whose 1-day reversal alpha the 1-day label already
+  captured. As that alpha was arbitraged away, what remained sits at longer
+  horizons, where the 5-day label is matched.
+
+- **Pooled-universe training** (`fast_fit.py --train-universes
+  csi300,csi500,csi1000`: one model on the union of the three indices' rows,
+  ~5.5M instead of ~1.1M, label z-scored over the union, scored in each
+  universe). Early stopping runs much longer (wf2018 51–81 trees, wf2020
+  22–41, vs 2–15 per universe), so the per-universe fits are
+  variance-limited. RankIC rises in every universe (0.034 → 0.038,
+  0.030 → 0.036, 0.041 → 0.047), yet the book does not: 1.54/0.52/0.98 vs
+  1.41/0.91/0.76, pooled t −0.02, ΔIR −0.08 [−0.34, 0.17].
+- **Why RankIC lift misses the book: asymmetric predictability.** Mean
+  5-day excess return by score bucket (h5, 2018–2025): top 50 +27/+17/+19
+  bps (CSI300/500/1000), bottom 20% −33/−29/−40 bps. The model is 1.5–2×
+  better at finding losers than winners, and RankIC counts both tails. Pooled
+  training's gain in CSI500 sits in the bottom 20% (−3.0 bps) with +0.5 bps in
+  the top 50; in CSI1000 it reaches the top (+7.9 bps), the one universe where
+  the pooled book gains. In CSI500 and CSI1000 the top 50 is no better than
+  the rest of the top 20% (17 vs 18, 19 vs 20 bps): the extreme top of the
+  score is saturated.
+- **Book size** (`book_eval.py --size f`: topk = f × N, n_drop scaled with
+  it). A wider book trades the saturated top for breadth and lower tracking
+  error: excess return falls a little and IR rises, so the paired mean t
+  stays near zero while the IR interval moves. 2018–2025, IR for top 50 /
+  20% / 50% / 80% of N: CSI300 1.41/1.50/1.28/0.49, CSI500
+  0.91/1.08/1.26/0.68, CSI1000 0.76/1.34/1.50/1.21; pooled ΔIR of 20% vs 50
+  names +0.36 [0.16, 0.56]; net of size exposure CSI1000 20% is IR 1.09
+  (t 2.92) vs 0.45. Registered check on the early windows
+  (`docs/registrations/spec_book_size_early.json`): CSI500 (50 → 100 names)
+  6.07 → 7.47, ΔIR [0.91, 1.98]; CSI300 (50 → 60) 3.06 → 2.85,
+  [−0.35, −0.05]; pooled −0.10 [−0.29, 0.10]: inconclusive by the registered
+  rule. What both periods agree on: in the larger universes a fixed 50 names
+  is too narrow. Not adopted; a 100-name CSI500 book is the candidate for the
+  next prospective registration.
+
+### Round 4: the shape of the signal
+
+Book construction is a function of one object, the conditional mean of
+forward excess return given the score's cross-sectional rank. `book_diagnostics.py
+curve` measures it (5-day excess by score ventile) together with
+frictionless daily-rebalanced books and their break-even costs;
+`reversal` and `size` (now with a paired IR-difference interval of the
+size residuals, per universe and pooled) explain and adjust it.
+
+- **2018–2025: the top saturated, the bottom carries the signal.** 5-day
+  excess by ventile, top three (18, 19, 20) / bottom: CSI300 +25.5/+23.5/+34.0
+  / −44; CSI500 +21.8/+21.6/+12.7 / −50; CSI1000 +20.2/+23.4/+18.2 / −87.
+  Frictionless, a book that holds the universe minus its bottom 10–20% has IR
+  2.4–3.6 at 5–10% daily turnover (break-even 11–19 bps one-way), against
+  1.2–2.1 for the top 50 at 37–47% (break-even 4.5–10 bps).
+- **Exclusion book, in sample.** `--size 0.8 --band 1.1` (hold 80% of N,
+  sell a name only when it falls below rank 0.88 N, refill from the top)
+  raises the size-adjusted IR over the top-50 book by +0.19/+0.55/+1.49,
+  pooled +0.90 [+0.19, +1.63], with lower return (3–5%/yr vs 6–12%) at much
+  lower tracking error. Bands at small books (band 1.1–1.2 at 50 names)
+  multiply turnover and lose 1–1.6 IR.
+- **Registered early-window test: refuted**
+  (`docs/registrations/spec_exclusion_book_early.json`, committed before
+  running). 2012–2017, `--tradable`: size-adjusted IR difference CSI300
+  −1.96 [−2.58, −1.21], CSI500 −1.82 [−2.90, −0.68], pooled −2.19
+  [−2.80, −1.46]. The top-50 book earned 28%/yr (CSI300) and 39%/yr
+  (CSI500) there; concentration wins. A 50/50 split of capital between the
+  two books does not hedge the regime either: it loses 0.25–0.7 pooled IR in
+  2012–2017 for +0.12–0.27 in 2018–2025.
+- **Why: the shape changed.** In 2012–2017 the curve is convex at the top
+  (top ventile +77 bps CSI300, +93 bps CSI500, the largest of all; frictionless
+  top-50 IR 5.2/8.0). Across 17 window × universe cells the top's convexity
+  (top ventile minus ventiles 17–19) sets which construction wins in the same
+  window (Spearman −0.85 with the exclusion book's IR gain), but the previous
+  window's convexity barely predicts the next (−0.42, n = 14): construction
+  cannot be timed from the trailing shape.
+- **Mechanism: short-term reversal lost its long side in 2017.** The top
+  ventile is mostly recent losers (past-5-day return percentile 0.32–0.44).
+  Reversal RankIC in CSI500 was 3.8–8.5 (×100) every year 2010–2016 and
+  −1.3 to 2.0 in 2017–2024; the decile of biggest 5-day losers went from
+  +12 bps over the next 5 days (mean of 2010–2016) to −10 (2017–2024),
+  while the biggest winners still lag (−7 to −33 bps in six of those eight
+  years). CSI300 breaks the same way (4–6 → about 1); CSI1000, whose
+  history starts in 2014, falls from 4–8 to 2–3. What remains of reversal is the overpriced side, which
+  needs shorting, and A-shares restrict it: the pattern Miller (1977) predicts
+  when short sales are constrained and buyers compete away the underpriced
+  side. It is why the model now finds losers 1.5–2× better than winners, why
+  RankIC gains (which count both tails) miss a long-only book, and why
+  2012–2017 books are so much stronger.
+- **Volatility is not the reason.** Within the top 10% by score, the
+  higher-volatility half earns as much or more (CSI500 20.5 vs 14.9 bps,
+  CSI1000 25.0 vs 20.3); a volatility filter would not lift the top.
+
+- **Recency-weighted training does not change the shape.** `fast_fit.py
+  --weight decay2` / `decay4` (sample weight 0.5^(age / 2 or 4 years)):
+  pooled ΔIR +0.01 [−0.33, 0.33] and +0.02 [−0.18, 0.22] (`--tradable`), and
+  the CSI500 top still saturates (ventiles 16–20: +18/+16/+16/+18/+15 bps).
+  The saturated top is in the post-2017 data, not in a model fitted to the old
+  regime.
+
+- **Price-volume anomalies are short-side only.** `book_diagnostics.py
+  screen` over 13 classic features (overnight and intraday 20-day returns,
+  MAX, skewness, abnormal amount and volume, 12-1 momentum, distance to the
+  240-day high, close/VWAP, Amihud illiquidity, 5- and 20-day returns,
+  volatility), 2018–2025. The significant deciles are all losers: in CSI1000
+  the top deciles of intraday run-up, MAX, abnormal amount, volume surge,
+  close/VWAP, 5- and 20-day return and volatility lag by 32–52 bps over five
+  days (t −4.0 to −5.5); in CSI500 intraday run-up (−24, t −2.3). Only 12-1
+  momentum and the 240-day-high ratio lean positive on the long side
+  (CSI300 +15 and +20 bps, t 1.2 and 1.8). Within the score's top 20%,
+  where the book buys, no feature splits returns significantly (largest
+  |t| 2.19 of 39 tests, CSI500 5-day return, in the momentum direction).
+
+Consequence for the search: improvements must find *winners* in a market
+where the cheapest winner signal has been arbitraged. Tail-symmetric metrics
+(RankIC, IC) and losses (MSE on z-scored labels) spend capacity on the short
+side. Not adopted: the exclusion book, sleeve blends, adaptive construction,
+recency weights. Price and volume alone have little left to say about
+winners; the open routes are information from outside them (earnings and
+analyst revisions, holdings and flows) or a benchmark-relative book that can
+underweight index names, which needs index weights (free-float shares) the
+provider does not have.
 
 ### Does marginal value persist?
 

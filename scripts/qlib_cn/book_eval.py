@@ -83,6 +83,7 @@ from run_qlib_baselines import PROTOCOLS, TOPK, _backtest  # noqa: E402
 
 DAYS = 238  # Qlib risk_analysis annualisation for daily returns
 BLOCK, DRAWS = 20, 2000
+UNIVERSE_SIZE = {"csi300": 300, "csi500": 500, "csi1000": 1000}
 
 
 def _nw_t(x: np.ndarray, lags: int) -> float:
@@ -203,32 +204,63 @@ def _frame(report: pd.DataFrame) -> pd.DataFrame:
                          "turnover": report["turnover"]})
 
 
-def _simulate(scores: dict[str, pd.Series], universe: str, n_drop: int, sim: str, salt: int) -> pd.DataFrame:
+def _simulate(scores: dict[str, pd.Series], universe: str, n_drop: int, sim: str, salt: int,
+              band: float | None = None, topk: int = TOPK) -> pd.DataFrame:
     if sim == "reset":
         return pd.concat([_frame(_backtest(scores[p], universe, PROTOCOLS[p], n_drop=n_drop, return_report=True,
-                                           tie_salt=salt)[1]) for p in scores]).sort_index()
+                                           tie_salt=salt, band=band, topk=topk)[1]) for p in scores]).sort_index()
     spans = sorted(PROTOCOLS[p]["test"] for p in scores)
     score = pd.concat(scores.values()).sort_index()
     _, report = _backtest(score, universe, {"test": (spans[0][0], spans[-1][1])}, n_drop=n_drop,
-                          return_report=True, tie_salt=salt)
+                          return_report=True, tie_salt=salt, band=band, topk=topk)
     return _frame(report)
 
 
-def _book(universe: str, windows: dict[str, str], patterns: dict[str, str], smooth: float, n_drop: int,
-          sim: str, draws: int = 1, neutral: float = 0.0) -> tuple[pd.DataFrame, pd.Series, dict[str, float]]:
-    """Daily book returns over all windows, averaged over ``draws`` tie-breaking keys."""
-    scores = {p: _neutralize(_signal(_runs(Path(root), patterns[p]), smooth), neutral)
-              for p, root in windows.items()}
-    runs = [_simulate(scores, universe, n_drop, sim, salt) for salt in range(draws)]
-    frame = sum(runs) / draws
-    score = pd.concat(scores.values()).sort_index()
-    ties = {"tie_share": float(score.groupby(level="datetime").apply(lambda d: d.duplicated().mean()).mean()),
-            "tie_draw_ir": [float(r["excess"].mean() / r["excess"].std() * math.sqrt(DAYS)) for r in runs]}
-    frame["window"] = None
-    for p in windows:
-        start, end = PROTOCOLS[p]["test"]
-        frame.loc[start:end, "window"] = p
-    return frame, score, ties
+_SCORES: dict[str, tuple] = {}  # key -> (window scores, n_drop, band, topk); read by forked workers
+JOBS = 1  # --jobs
+
+
+def _simulate_key(key: str, universe: str, sim: str, salt: int) -> pd.DataFrame:
+    scores, n_drop, band, topk = _SCORES[key]
+    return _simulate(scores, universe, n_drop, sim, salt, band, topk)
+
+
+def _map(fn, tasks: list[tuple]) -> list:
+    """``fn(*task)`` for every task, in ``JOBS`` forked processes that share the parent's cached Exchange."""
+    if JOBS <= 1 or len(tasks) <= 1:
+        return [fn(*t) for t in tasks]
+    import multiprocessing
+
+    with multiprocessing.get_context("fork").Pool(min(JOBS, len(tasks))) as pool:
+        return pool.starmap(fn, tasks, chunksize=1)
+
+
+def _books(universe: str, windows: dict[str, str], specs: dict[str, tuple], sim: str,
+           draws: int = 1) -> dict[str, tuple[pd.DataFrame, pd.Series, dict[str, float]]]:
+    """Daily book returns over all windows for every ``key -> (patterns, smooth, n_drop, neutral, band, topk)``,
+    each averaged over ``draws`` tie-breaking keys; all (book, draw) backtests run in parallel."""
+    from run_qlib_baselines import _exchange
+
+    _SCORES.clear()
+    for key, (patterns, smooth, n_drop, neutral, band, topk) in specs.items():
+        _SCORES[key] = ({p: _neutralize(_signal(_runs(Path(root), patterns[p]), smooth), neutral)
+                         for p, root in windows.items()}, n_drop, band, topk)
+    _exchange(universe)  # built once, before forking
+    tasks = [(key, universe, sim, salt) for key in specs for salt in range(draws)]
+    reports = dict(zip([(t[0], t[3]) for t in tasks], _map(_simulate_key, tasks)))
+    out = {}
+    for key in specs:
+        runs = [reports[key, salt] for salt in range(draws)]
+        frame = sum(runs) / draws
+        score = pd.concat(_SCORES[key][0].values()).sort_index()
+        ties = {"tie_share": float(score.groupby(level="datetime").apply(lambda d: d.duplicated().mean()).mean()),
+                "tie_draw_ir": [float(r["excess"].mean() / r["excess"].std() * math.sqrt(DAYS)) for r in runs]}
+        frame["window"] = None
+        for p in windows:
+            start, end = PROTOCOLS[p]["test"]
+            frame.loc[start:end, "window"] = p
+        out[key] = (frame, score, ties)
+    return out
 
 
 def _valid_ir(universe: str, root: Path, patterns: str, split: dict, draws: int = 1) -> float:
@@ -260,6 +292,11 @@ def main() -> None:
     parser.add_argument("--book", action="append", required=True, help="name=glob[,glob...]")
     parser.add_argument("--smooth", default="0", help="comma-separated EMA half-lives (0 = none)")
     parser.add_argument("--n-drop", default="5", help="comma-separated TopkDropout n_drop values")
+    parser.add_argument("--size", default=None,
+                        help="comma-separated book sizes as fractions of the universe: also trade each book with "
+                             "topk = f x N and n_drop scaled by the same factor (n_drop/topk kept)")
+    parser.add_argument("--band", default=None,
+                        help="comma-separated rank bands (x topk): also trade each book with the band rule")
     parser.add_argument("--select", action="append", default=[],
                         help="name=book,book,...: per window, the book with the best validation IR")
     parser.add_argument("--sim", choices=["continuous", "reset"], default="continuous")
@@ -270,10 +307,16 @@ def main() -> None:
                         help="industry.parquet[:w,w,...]: also score each book with w x its (day, industry) "
                              "mean removed (default weights 1)")
     parser.add_argument("--baseline", default=None)
+    parser.add_argument("--jobs", type=int, default=8, help="parallel backtest processes")
+    parser.add_argument("--tradable", action="store_true",
+                        help="TopkDropout only_tradable: buy the next-ranked name instead of a suspended/limit one")
     parser.add_argument("--out", type=Path, required=True)
     args = parser.parse_args()
-    global COMBINE, COSTS, INDUSTRY
-    COMBINE, COSTS = args.combine, args.costs
+    global COMBINE, COSTS, INDUSTRY, JOBS
+    COMBINE, COSTS, JOBS = args.combine, args.costs, args.jobs
+    import run_qlib_baselines
+
+    run_qlib_baselines.ONLY_TRADABLE = args.tradable
     neutrals = [0.0]
     if args.neutral:
         path, _, weights = args.neutral.partition(":")
@@ -305,24 +348,30 @@ def main() -> None:
         print(name, json.dumps(selections[name]), flush=True)
     smooths = [float(h) for h in args.smooth.split(",")]
     drops = [int(n) for n in args.n_drop.split(",")]
+    bands = [None] + [float(b) for b in args.band.split(",")] if args.band else [None]
+    sizes = [None] + [float(f) for f in args.size.split(",")] if args.size else [None]
 
     per_book = {name: {p: patterns for p in windows} for name, patterns in books.items()}
     per_book.update({name: {p: books[c["chosen"]] for p, c in chosen.items()} for name, chosen in selections.items()})
+    specs = {}
+    for name, patterns in per_book.items():
+        for h, n_drop, w, band, size in itertools.product(smooths, drops, neutrals, bands, sizes):
+            key = (name + (f"@ema{h:g}" if h else "") + (f"@drop{n_drop}" if n_drop != 5 else "")
+                   + (f"@neutral{w:g}" if w else "") + (f"@band{band:g}" if band else "")
+                   + (f"@size{size:g}" if size else ""))
+            topk = round(size * UNIVERSE_SIZE[args.universe]) if size else TOPK
+            specs[key] = (patterns, h, max(1, round(topk * n_drop / TOPK)) if size else n_drop, w, band, topk)
     daily: dict[str, pd.DataFrame] = {}
     ties: dict[str, dict] = {}
-    for name, patterns in per_book.items():
-        for h, n_drop, w in itertools.product(smooths, drops, neutrals):
-            key = (name + (f"@ema{h:g}" if h else "") + (f"@drop{n_drop}" if n_drop != 5 else "")
-                   + (f"@neutral{w:g}" if w else ""))
-            frame, score, ties[key] = _book(args.universe, windows, patterns, h, n_drop, args.sim,
-                                            args.tie_draws, w)
-            frame = frame.join(_daily_top(score, label).rename("top")).join(
-                _daily_ric(score, label).rename("ric"))
-            daily[key] = frame
-            assert daily[key].index.is_unique
-            print(key, json.dumps(_summary(daily[key])), flush=True)
+    for key, (frame, score, ties[key]) in _books(args.universe, windows, specs, args.sim, args.tie_draws).items():
+        frame = frame.join(_daily_top(score, label).rename("top")).join(
+            _daily_ric(score, label).rename("ric"))
+        daily[key] = frame
+        assert daily[key].index.is_unique
+        print(key, json.dumps(_summary(daily[key])), flush=True)
 
     result = {"windows": list(windows), "books": books, "sim": args.sim, "combine": args.combine,
+              "tradable": args.tradable,
               "tie_draws": args.tie_draws,
               "costs": args.costs, "selections": selections,
               "results": {}}
