@@ -37,6 +37,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from factorminer.application.marginal_admission import zone_panel
 from factorminer.application.research_actions import discovery_dataset
 from factorminer.core.parser import try_parse
 from factorminer.core.reference_catalogs import reference_catalog
@@ -71,11 +72,13 @@ def _signals(trees, dataset, backend: str) -> list[np.ndarray | None]:
                 else np.asarray(panel, dtype=np.float64) for _, panel, error in outcomes]
 
 
-def _basis(dataset, returns: np.ndarray, config: MarginalConfig, backend: str) -> MarginalBasis:
+def _basis(dataset, returns: np.ndarray, config: MarginalConfig, backend: str,
+           admission=None) -> MarginalBasis:
     trees = [tree for _, formula in reference_catalog("alpha158")
              if (tree := try_parse(formula)) is not None]
     panels = (panel for panel in _signals(trees, dataset, backend) if panel is not None)
-    return MarginalBasis(returns, panels, config)
+    zone = zone_panel(admission, dataset.data_dict) if admission is not None else None
+    return MarginalBasis(returns, panels, config, zone_score=zone)
 
 
 def main() -> None:
@@ -101,13 +104,13 @@ def main() -> None:
     trees = [try_parse(formula) for _, _, formula in stream]
 
     # Statistics against the reference basis alone: discovery panel and validation split.
-    train_basis = _basis(discovery, discovery.returns, base_config, args.backend)
+    train_basis = _basis(discovery, discovery.returns, base_config, args.backend, cfg.admission)
     cached = args.out / "candidates.csv"
     if cached.exists() and not args.force:
         kept = _cached_signals(cached, stream, trees, discovery, args)
         rows = None
     else:
-        rows, kept = _score_candidates(full, discovery, stream, trees, train_basis, base_config, args)
+        rows, kept = _score_candidates(full, discovery, stream, trees, train_basis, base_config, args, cfg.admission)
     args.out.mkdir(parents=True, exist_ok=True)
     if rows is not None:
         pd.DataFrame(rows).to_csv(cached, index=False)
@@ -124,11 +127,11 @@ def main() -> None:
         for iteration in iterations:
             batch = []
             for i in (i for i, (it, _, _) in enumerate(stream) if it == iteration and i in kept):
-                stats = train_basis.evaluate(kept[i])
+                stats = train_basis.evaluate(kept[i], rule)  # the rule's statistics options too
                 if passes_marginal_admission(stats, rule)[0]:
                     batch.append((stats.partial_ic_t, i))
             for position, (_, i) in enumerate(sorted(batch, reverse=True)):
-                if position and not passes_marginal_admission(train_basis.evaluate(kept[i]), rule)[0]:
+                if position and not passes_marginal_admission(train_basis.evaluate(kept[i], rule), rule)[0]:
                     continue
                 train_basis.add(i, kept[i])
                 library.append(i)
@@ -164,11 +167,11 @@ def _cached_signals(cached: Path, stream, trees, discovery, args) -> dict[int, n
     return kept
 
 
-def _score_candidates(full, discovery, stream, trees, train_basis, base_config, args):
+def _score_candidates(full, discovery, stream, trees, train_basis, base_config, args, admission=None):
     valid_returns = np.full_like(full.returns, np.nan)
     valid_idx = full.get_split("validation").indices
     valid_returns[:, valid_idx] = full.returns[:, valid_idx]
-    valid_basis = _basis(full, valid_returns, base_config, args.backend)
+    valid_basis = _basis(full, valid_returns, base_config, args.backend, admission)
     rows, kept = [], {}
     chunk = 64  # full-panel signals of a chunk at a time
     for start in range(0, len(stream), chunk):

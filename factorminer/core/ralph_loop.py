@@ -62,6 +62,7 @@ from factorminer.architecture import (
     build_memory_policy,
     dataset_scope_identity,
 )
+from factorminer.architecture.trial_ledger import canonical_formula_identity
 from factorminer.core.factor_library import FactorLibrary
 from factorminer.core.library_io import load_library, save_library
 from factorminer.core.loop_services import LoopExecutionService
@@ -429,11 +430,16 @@ class RalphLoop:
         _loop: RalphLoop,
         payload: IterationPayload,
     ) -> list[tuple[str, str]]:
+        extras: dict[str, Any] = {"dataset_contract": self.dataset_contract.to_dict()}
+        if self.settings.tried_in_prompt > 0:
+            extras["recently_tried"] = self._recently_tried(self.settings.tried_in_prompt)
+        if self.settings.task_brief:
+            extras["task_brief"] = self._task_brief()
         payload.prompt_context = self.prompt_context_builder.build(
             payload.memory_signal,
             payload.library_state,
             batch_size=payload.batch_size,
-            extras={"dataset_contract": self.dataset_contract.to_dict()},
+            extras=extras,
             research_archetypes=payload.memory_signal.get("research_archetypes"),
         )
         candidates = self.generator.generate_batch(
@@ -441,7 +447,47 @@ class RalphLoop:
             library_state=payload.library_state,
             batch_size=payload.batch_size,
         )
-        return candidate_pairs(candidates)
+        pairs = candidate_pairs(candidates)
+        if self.settings.skip_tried:
+            pairs, skipped = self._drop_tried(pairs)
+            payload.stage_metrics["tried_skipped"] = skipped
+        return pairs
+
+    def _task_brief(self) -> str:
+        """The campaign's research brief (``mining.task_brief`` file), read once."""
+        if not hasattr(self, "_task_brief_text"):
+            from pathlib import Path
+
+            self._task_brief_text = Path(self.settings.task_brief).expanduser().read_text().strip()
+        return self._task_brief_text
+
+    def _recently_tried(self, limit: int) -> list[str]:
+        """Most recent distinct formulas this campaign evaluated and did not admit."""
+        seen: set[str] = set()
+        formulas: list[str] = []
+        for observation in reversed(self.trial_ledger.observations):
+            if observation.metadata.get("admitted") or observation.canonical_formula_hash in seen:
+                continue
+            seen.add(observation.canonical_formula_hash)
+            formulas.append(observation.formula)
+            if len(formulas) >= limit:
+                break
+        return formulas[::-1]
+
+    def _drop_tried(self, pairs: list[tuple[str, str]]) -> tuple[list[tuple[str, str]], int]:
+        """Drop candidates whose canonical formula was already evaluated (or repeats in-batch)."""
+        seen = {o.canonical_formula_hash for o in self.trial_ledger.observations}
+        kept: list[tuple[str, str]] = []
+        for name, formula in pairs:
+            try:
+                digest = canonical_formula_identity(formula)[1]
+            except ValueError:
+                kept.append((name, formula))  # unparsable: left to the evaluator to reject
+                continue
+            if digest not in seen:
+                seen.add(digest)
+                kept.append((name, formula))
+        return kept, len(pairs) - len(kept)
 
     def _stage_evaluate(
         self,

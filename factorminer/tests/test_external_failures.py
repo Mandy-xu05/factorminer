@@ -92,6 +92,29 @@ def test_hosted_draft_uses_its_own_credential_and_endpoint(monkeypatch):
     assert roles["primary"]["credential"]["source"] == "config"
 
 
+def test_deepseek_effort_is_sent_as_reasoning_effort_and_named(monkeypatch):
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "deepseek-env")
+    provider = create_provider({"provider": "deepseek", "model": "deepseek-flash", "effort": "max"})
+    assert provider.inner.effort == "max"
+    assert provider.inner.build_request_kwargs("s", "u")["reasoning_effort"] == "max"
+    assert provider.provider_name == "deepseek/deepseek-flash@max"
+    default = DeepSeekProvider(api_key="key")
+    assert "reasoning_effort" not in default.build_request_kwargs("s", "u")
+    assert default.provider_name == "deepseek/deepseek-flash"
+    with pytest.raises(ValueError):
+        DeepSeekProvider(api_key="key", effort="ultra")
+
+
+def test_cli_passes_llm_effort_to_the_provider(monkeypatch):
+    from factorminer.cli.app import _create_llm_provider
+    from factorminer.utils.config import load_config
+
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "deepseek-env")
+    cfg = load_config(overrides={"llm": {"provider": "deepseek", "model": "deepseek-flash", "effort": "high"}})
+    assert cfg.llm.effort == "high"
+    assert _create_llm_provider(cfg, mock=False).inner.effort == "high"
+
+
 def test_guarded_provider_types_and_records_failures():
     guarded = GuardedProvider(FailingProvider(RateLimitError("slow down")), role=PRIMARY)
     with pytest.raises(ProviderCallError) as caught:
@@ -353,3 +376,62 @@ def test_mining_budget_records_provider_tokens_per_iteration(tmp_path):
     assert calls["n"] >= 1
     assert loop.budget.llm_prompt_tokens == 500 * calls["n"]
     assert loop.budget.llm_completion_tokens == 200 * calls["n"]
+
+
+def test_a_truncated_batch_is_skipped_but_a_run_of_them_aborts(monkeypatch):
+    from factorminer.agent.factor_generator import MAX_CONSECUTIVE_TRUNCATIONS, FactorGenerator
+
+    provider = DeepSeekProvider(api_key="key")
+    responses = [_completion(None, "length"), _completion("1. a: Neg($close)", "stop")]
+    responses += [_completion(None, "length")] * MAX_CONSECUTIVE_TRUNCATIONS
+    monkeypatch.setattr(provider, "_get_client", lambda: _FakeClient(responses.pop(0)))
+    generator = FactorGenerator(llm_provider=GuardedProvider(provider, role=PRIMARY))
+    assert generator.generate_batch(batch_size=1) == []
+    assert [c.formula for c in generator.generate_batch(batch_size=1)] == ["Neg($close)"]
+    for _ in range(MAX_CONSECUTIVE_TRUNCATIONS - 1):
+        assert generator.generate_batch(batch_size=1) == []
+    with pytest.raises(ProviderCallError) as caught:
+        generator.generate_batch(batch_size=1)
+    assert caught.value.kind == "truncated"
+
+
+def test_deepseek_thinking_calls_get_the_full_reasoning_budget(monkeypatch):
+    from factorminer.agent.llm_interface import (
+        DEEPSEEK_MAX_OUTPUT_TOKENS,
+        DEEPSEEK_THINKING_TIMEOUT_S,
+    )
+
+    thinking = DeepSeekProvider(api_key="key", effort="max", timeout_s=300)
+    assert thinking.build_request_kwargs("s", "u", max_tokens=128)["max_tokens"] == DEEPSEEK_MAX_OUTPUT_TOKENS
+    assert thinking.build_request_kwargs("s", "u", max_tokens=1_000_000)["max_tokens"] == DEEPSEEK_MAX_OUTPUT_TOKENS
+    assert thinking.timeout_s == DEEPSEEK_THINKING_TIMEOUT_S
+    default = DeepSeekProvider(api_key="key")  # API default effort is high: thinking
+    assert default.build_request_kwargs("s", "u", max_tokens=128)["max_tokens"] == DEEPSEEK_MAX_OUTPUT_TOKENS
+    capped = DeepSeekProvider(api_key="key", reasoning_budget=50_000)
+    assert capped.build_request_kwargs("s", "u", max_tokens=128)["max_tokens"] == 50_000
+    plain = DeepSeekProvider(api_key="key", effort="none", timeout_s=60)
+    assert plain.build_request_kwargs("s", "u", max_tokens=128)["max_tokens"] == 128
+    assert plain.timeout_s == 60
+
+    sent = {}
+
+    def create(**kwargs):
+        sent.update(kwargs)
+        return _completion(None, "length")
+
+    client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+    monkeypatch.setattr(thinking, "_get_client", lambda: client)
+    with pytest.raises(TruncatedResponseError, match=str(DEEPSEEK_MAX_OUTPUT_TOKENS)):
+        thinking.generate("s", "u", max_tokens=128)
+    assert sent["max_tokens"] == DEEPSEEK_MAX_OUTPUT_TOKENS
+
+
+def test_cli_passes_reasoning_budget(monkeypatch):
+    from factorminer.cli.app import _create_llm_provider
+    from factorminer.utils.config import load_config
+
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "deepseek-env")
+    cfg = load_config(overrides={"llm": {"provider": "deepseek", "reasoning_budget": 100_000}})
+    assert _create_llm_provider(cfg, mock=False).inner.reasoning_budget == 100_000
+    cfg = load_config(overrides={"llm": {"provider": "deepseek"}})
+    assert _create_llm_provider(cfg, mock=False).inner.reasoning_budget == 393_216

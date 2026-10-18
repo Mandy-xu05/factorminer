@@ -27,6 +27,13 @@ class MiningConfig:
     correlation_threshold: float = 0.5
     replacement_ic_min: float = 0.10
     replacement_ic_ratio: float = 1.3
+    # Novelty: drop candidates whose canonical formula this campaign already
+    # evaluated, and show the model its last ``tried_in_prompt`` rejected formulas.
+    skip_tried: bool = False
+    tried_in_prompt: int = 0
+    # A research brief (path to a text file) shown to the model in place of the generic
+    # orthogonality directive: e.g. the residual-explanation task of ``error_analysis.py``.
+    task_brief: str = ""
 
     def validate(self) -> None:
         if self.target_library_size < 1:
@@ -45,6 +52,8 @@ class MiningConfig:
             raise ValueError("replacement_ic_min must be > ic_threshold")
         if self.replacement_ic_ratio < 1.0:
             raise ValueError("replacement_ic_ratio must be >= 1.0")
+        if self.tried_in_prompt < 0:
+            raise ValueError("tried_in_prompt must be >= 0")
 
 
 @dataclass
@@ -207,6 +216,12 @@ class LLMConfig:
     prompt_cache: bool = True
     # Request timeout seconds (frontier + local compatible clients).
     timeout_s: float = 120.0
+    # Reasoning effort for providers that take one (deepseek: none/low/high/max;
+    # anthropic: low..max). None keeps the provider's default.
+    effort: str | None = None
+    # Minimum output tokens of every call to a provider whose hidden reasoning
+    # counts against max_tokens (deepseek). None: the API maximum (393216).
+    reasoning_budget: int | None = None
     # Optional OpenAI-compatible base URL (local YAML only; SSRF-sensitive).
     base_url: str | None = None
     # Cheap-first cascade routing (default OFF). Nested keys under llm.cascade
@@ -242,6 +257,8 @@ class LLMConfig:
             raise ValueError("batch_candidates must be >= 1")
         if self.timeout_s <= 0:
             raise ValueError("timeout_s must be > 0")
+        if self.reasoning_budget is not None and self.reasoning_budget < 1:
+            raise ValueError("reasoning_budget must be >= 1")
         if self.cascade_timeout_s <= 0:
             raise ValueError("cascade_timeout_s must be > 0")
 
@@ -757,6 +774,18 @@ class AdmissionConfig:
     min_top_t: float | None = None
     min_top_lift_bps: float | None = None
     min_top_lift_t: float | None = None
+    # out-of-sample-aware gates (evaluation.marginal.MarginalConfig)
+    blocks: int = 0
+    block_purge: int = 6
+    min_block_t: float | None = None
+    min_block_mean_minus_sd: float | None = None
+    retention: tuple[tuple[float, float], ...] = ()
+    min_shrunk_partial_ic: float | None = None
+    regime_periods: int = 0
+    regime_weight: float = 1.0
+    # top-of-book admission against a frozen stage-1 score held in a panel leaf (e.g. "s1")
+    zone_leaf: str = ""
+    zone_residual: bool = False
 
     def validate(self) -> None:
         if self.policy not in ADMISSION_POLICIES:
@@ -777,6 +806,8 @@ class AdmissionConfig:
         settings = asdict(self)
         settings.pop("policy")
         settings.pop("reference")
+        settings.pop("zone_leaf")
+        settings["retention"] = tuple((float(t), float(share)) for t, share in settings["retention"])
         return settings
 
 
