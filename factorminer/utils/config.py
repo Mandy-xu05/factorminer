@@ -854,7 +854,7 @@ class Config:
         """Write config to a YAML file."""
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "w") as f:
+        with open(path, "w", encoding="utf-8") as f:
             yaml.dump(self.to_dict(), f, default_flow_style=False, sort_keys=False)
 
 
@@ -905,7 +905,7 @@ def _deep_merge(base: dict, override: dict) -> dict:
 
 def _load_yaml(path: Path) -> dict[str, Any]:
     """Load a YAML file and return its contents as a dict."""
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         data = yaml.safe_load(f)
     if data is None:
         return {}

@@ -45,7 +45,7 @@ def load_raw_config_data(config_path: str | None) -> dict:
     """Load raw YAML including top-level fields not mapped to dataclasses."""
     raw = load_default_yaml()
     if config_path:
-        with open(config_path) as stream:
+        with open(config_path, encoding="utf-8") as stream:
             user_raw = yaml.safe_load(stream) or {}
         if isinstance(user_raw, dict):
             raw = deep_merge_dict(raw, user_raw)

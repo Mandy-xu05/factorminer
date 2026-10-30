@@ -1,0 +1,243 @@
+data_path: null
+output_dir: ./output
+mining:
+  target_library_size: 5
+  batch_size: 8
+  max_iterations: 3
+  ic_threshold: 0.0001
+  icir_threshold: 0.0001
+  correlation_threshold: 1.0
+  replacement_ic_min: 0.001
+  replacement_ic_ratio: 1.0
+evaluation:
+  num_workers: 40
+  fast_screen_assets: 100
+  gpu_device: cuda:0
+  backend: numpy
+  redundancy_metric: spearman
+  signal_failure_policy: synthetic
+  signal_dtype: float64
+  signal_cache_mb: null
+data:
+  market: a_shares
+  universe: CSI500
+  frequency: 10min
+  features:
+  - $open
+  - $high
+  - $low
+  - $close
+  - $volume
+  - $amt
+  - $vwap
+  - $returns
+  train_period:
+  - '2024-01-01'
+  - '2024-12-31'
+  test_period:
+  - '2025-01-01'
+  - '2025-12-31'
+  targets:
+  - name: paper
+    entry_delay_bars: 1
+    holding_bars: 1
+    price_pair: open_to_close
+    return_transform: simple
+  default_target: paper
+preprocess:
+  winsor_lower: 1.0
+  winsor_upper: 99.0
+  min_nonnan_ratio: 0.5
+  ffill_limit: null
+  cross_fill_method: median
+  standardise: true
+  halt_volume_threshold: 0.0
+  features_to_standardise:
+  - open
+  - high
+  - low
+  - close
+  - volume
+  - amount
+  - vwap
+  - returns
+admission:
+  policy: paper
+  reference: alpha158
+  reference_components: 16
+  ridge: 0.001
+  min_assets: 30
+  topk_fraction: 0.16666666666666666
+  drop_fraction: 0.1
+  cost_bps: 20.0
+  min_t: 3.0
+  min_partial_ic: 0.005
+  min_residual_share: 0.2
+  min_excess_bps: 0.0
+  min_net_bps: null
+  recent_periods: 0
+  min_recent_t: 1.0
+llm:
+  provider: mock
+  model: mock
+  api_key: null
+  temperature: 0.8
+  max_tokens: 4096
+  batch_candidates: 8
+  prompt_cache: true
+  timeout_s: 120.0
+  base_url: null
+  cascade_enabled: false
+  cascade_draft_provider: openai_compatible
+  cascade_draft_model: llama3.2
+  cascade_draft_base_url: http://127.0.0.1:11434/v1
+  cascade_timeout_s: 60.0
+  cascade_escalate_on_parse_failure: true
+memory:
+  policy: paper
+  max_success_patterns: 50
+  max_failure_patterns: 100
+  max_insights: 30
+  consolidation_interval: 10
+  regime_lookback_window: 60
+benchmark:
+  mode: paper
+  seed: 42
+  freeze_top_k: 40
+  freeze_universe: CSI500
+  report_universes:
+  - CSI500
+  - CSI1000
+  - HS300
+  - Binance
+  baselines:
+  - alpha101_classic
+  - alpha101_adapted
+  - random_exploration
+  - gplearn
+  - alphaforge_style
+  - alphaagent_style
+  - factor_miner
+  - factor_miner_no_memory
+  cost_bps:
+  - 1.0
+  - 4.0
+  - 7.0
+  - 10.0
+  - 11.0
+  efficiency_panel_shape:
+  - 12610
+  - 500
+  mock_panel_shape: null
+  strategy_ablation:
+    enabled: false
+    baseline: factor_miner
+    memory_policies:
+    - paper
+    - none
+    - kg
+    - family_aware
+    - regime_aware
+    dependence_metrics:
+    - spearman
+    - pearson
+    - distance_correlation
+    backends:
+    - numpy
+    - c
+    - gpu
+research:
+  enabled: false
+  knowledge_retrieval_limit: 4
+  primary_objective: weighted_multi_horizon
+  target_aggregation: weighted
+  horizon_weights: {}
+  uncertainty:
+    bootstrap_samples: 200
+    block_size: 20
+    shrinkage_strength: 1.0
+    lcb_zscore: 1.0
+    fdr_alpha: 0.05
+  admission:
+    use_residual_ic: true
+    use_effective_rank_gain: true
+    strict_profile: false
+    cross_fit_residual: true
+    turnover_penalty: 0.05
+    redundancy_penalty: 0.2
+    min_score: 0.04
+    min_lcb: 0.0
+    min_residual_ic: 0.02
+    min_span_gain: 0.05
+    min_effective_rank_gain: 0.0
+    min_log_det_gain: -0.1
+    ridge_lambda: 0.001
+    log_det_epsilon: 1.0e-06
+  selection:
+    models:
+    - ridge
+    - elastic_net
+    - lasso
+    - xgboost
+    rolling_train_window: 80
+    rolling_test_window: 20
+    rolling_step: 20
+  regimes:
+    enabled: false
+    definition: return_volatility_liquidity
+  execution:
+    cost_model: linear_bps
+    cost_bps: 4.0
+phase2:
+  causal:
+    enabled: false
+    granger_max_lag: 5
+    granger_significance: 0.05
+    n_interventions: 3
+    intervention_magnitude: 2.0
+    intervention_ic_threshold: 0.5
+    robustness_threshold: 0.4
+    granger_weight: 0.4
+    intervention_weight: 0.6
+  regime:
+    enabled: false
+    lookback_window: 60
+    bull_return_threshold: 0.0
+    bear_return_threshold: 0.0
+    volatility_percentile: 0.7
+    min_regime_ic: 0.03
+    min_regimes_passing: 2
+  capacity:
+    enabled: false
+    base_capital_usd: 100000000.0
+    ic_degradation_limit: 0.2
+    net_icir_threshold: 0.3
+    sigma_annual: 0.25
+  significance:
+    enabled: false
+    bootstrap_n_samples: 1000
+    bootstrap_block_size: 20
+    bootstrap_method: circular_block
+    fdr_level: 0.05
+    deflated_sharpe_enabled: true
+    min_deflated_sharpe: 0.0
+  debate:
+    enabled: false
+    num_specialists: 3
+    candidates_per_specialist: 15
+    enable_critic: true
+    top_k_after_critic: 40
+    critic_temperature: 0.3
+  auto_inventor:
+    enabled: false
+    invention_interval: 10
+    max_proposals_per_round: 5
+    min_ic_contribution: 0.03
+    store_dir: ./output/custom_operators
+  helix:
+    enabled: false
+    enable_knowledge_graph: false
+    enable_embeddings: false
+    enable_canonicalization: true
+    forgetting_lambda: 0.95
+    forgetting_demotion_threshold: 20

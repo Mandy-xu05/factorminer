@@ -1,0 +1,33 @@
+data_path: "./data/my_daily.csv"
+output_dir: "./output/my_5d_run"
+
+data:
+  market: "a_shares"  
+  universe: "my_universe"
+  frequency: "1d"
+  train_period: ["2022-01-01", "2024-12-31"]
+  test_period: ["2025-01-01", "2025-12-31"]
+  targets:
+    - name: "future_5d"
+      entry_delay_bars: 0
+      holding_bars: 5
+      price_pair: "close_to_close"
+      return_transform: "simple"
+  default_target: "future_5d"
+
+llm:
+  provider: "deepseek"
+  model: "deepseek-flash"
+  effort: "none"
+  max_tokens: 4096
+  batch_candidates: 6
+
+evaluation:
+  backend: "numpy"
+  num_workers: 4
+  signal_failure_policy: "reject"
+
+mining:
+  max_iterations: 2
+  batch_size: 6
+  target_library_size: 8

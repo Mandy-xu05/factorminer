@@ -20,6 +20,6 @@ def load_default_yaml() -> dict[str, Any]:
     """
     if not DEFAULT_CONFIG_PATH.exists():
         return {}
-    with open(DEFAULT_CONFIG_PATH) as f:
+    with open(DEFAULT_CONFIG_PATH, encoding="utf-8") as f:
         data = yaml.safe_load(f)
     return data if isinstance(data, dict) else {}

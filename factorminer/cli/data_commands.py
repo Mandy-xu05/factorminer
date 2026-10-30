@@ -70,7 +70,7 @@ def init_config(path: str, force: bool) -> None:
         raise click.ClickException(f"{output_path} already exists. Pass --force to overwrite.")
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(output_path, "w") as file:
+    with open(output_path, "w", encoding="utf-8") as file:
         yaml.safe_dump(_starter_config(), file, sort_keys=False)
     click.echo(f"Wrote starter config to {output_path}")
 
