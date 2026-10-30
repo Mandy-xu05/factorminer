@@ -1,4 +1,5 @@
 .env
+my_5d_dsk.yaml
 .venv/
 __pycache__/
 *.py[cod]

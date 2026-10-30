@@ -57,6 +57,71 @@ UNIVERSE_ALIASES = {
 FileFormat = Literal["csv", "parquet", "hdf5"]
 
 
+def read_panel_path(path: str | Path) -> pd.DataFrame:
+    """Read a table file or a directory of Parquet row partitions."""
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(f"Panel path not found: {path}")
+    if not path.is_dir():
+        return _read_file(path, _infer_format(path))
+    files = sorted(path.rglob("*.parquet")) + sorted(path.rglob("*.pq"))
+    if not files:
+        raise ValueError(f"No Parquet files found in {path}")
+    return pd.concat([_read_file(p, _infer_format(p)) for p in files], ignore_index=False)
+
+
+def normalize_panel_keys(df: pd.DataFrame) -> pd.DataFrame:
+    """Normalize date/code keys, including named index levels and YYYYMMDD dates."""
+    df = df.copy()
+    for key in ("datetime", "asset_id"):
+        aliases = [key, *COLUMN_ALIASES[key]]
+        if key not in df.columns:
+            source = next((c for c in aliases if c in df.columns), None)
+            if source is None:
+                source = next((c for c in aliases if c in df.index.names), None)
+                if source is not None:
+                    df = df.reset_index(level=source)
+            if source is None:
+                raise ValueError(f"Panel missing {key!r} key")
+            df = df.rename(columns={source: key})
+    dates = df["datetime"]
+    if pd.api.types.is_integer_dtype(dates):
+        dates = dates.astype(str)
+    df["datetime"] = pd.to_datetime(dates, errors="raise")
+    df["asset_id"] = df["asset_id"].astype("string").str.strip()
+    if df[["datetime", "asset_id"]].isna().any().any() or df["asset_id"].eq("").any():
+        raise ValueError("Panel contains missing date/asset keys")
+    return df
+
+
+def read_market_directory(path: Path) -> pd.DataFrame:
+    """Read per-field date/code/value files, or row-partitioned market tables."""
+    fields = {"open": ["open"], "high": ["high"], "low": ["low"], "close": ["close"],
+              "volume": ["volume", "vol"], "vwap": ["vwap"], "amount": ["amount", "amt"]}
+    panels = []
+    for field, aliases in fields.items():
+        candidates = [path / f"{alias}{suffix}" for alias in aliases
+                      for suffix in (".parquet", ".pq", "")]
+        existing = [candidate for candidate in candidates if candidate.exists()]
+        if len(existing) > 1:
+            raise ValueError(f"Ambiguous sources for {field}: {existing}")
+        if not existing:
+            continue
+        panel = normalize_panel_keys(read_panel_path(existing[0]))
+        if "value" not in panel:
+            raise ValueError(f"Per-field panel {existing[0]} requires a value column")
+        panel = panel[["datetime", "asset_id", "value"]].rename(columns={"value": field})
+        if panel.duplicated(["datetime", "asset_id"]).any():
+            raise ValueError(f"Duplicate date/asset keys in {existing[0]}")
+        panels.append(panel)
+    if not panels:
+        return normalize_panel_keys(read_panel_path(path))
+    result = panels[0]
+    for panel in panels[1:]:
+        result = result.merge(panel, on=["datetime", "asset_id"], how="outer", validate="one_to_one")
+    return result
+
+
 def _infer_format(path: Path) -> FileFormat:
     suffix = path.suffix.lower()
     mapping = {
@@ -109,6 +174,12 @@ def _validate_columns(df: pd.DataFrame, path: Path) -> pd.DataFrame:
             missing.append(req)
             continue
         rename_map[matched] = req
+    # VWAP-only vendors need not invent turnover in unknown volume units.
+    vwap_column = cols_lower.get("vwap")
+    if vwap_column is not None:
+        rename_map[vwap_column] = "vwap"
+        if "amount" in missing:
+            missing.remove("amount")
     if missing:
         raise ValueError(
             f"File {path} is missing required columns: {missing}. "
@@ -189,11 +260,11 @@ def load_market_data(
     if not path.exists():
         raise FileNotFoundError(f"Data file not found: {path}")
 
-    if fmt is None:
-        fmt = _infer_format(path)
-
-    logger.info("Loading %s from %s", fmt, path)
-    df = _read_file(path, fmt, hdf_key=hdf_key)
+    if path.is_dir():
+        df = read_market_directory(path)
+    else:
+        df = _read_file(path, fmt or _infer_format(path), hdf_key=hdf_key)
+    logger.info("Loading %s from %s", "parquet directory" if path.is_dir() else fmt, path)
     df = _validate_columns(df, path)
     df = _coerce_types(df)
 

@@ -84,7 +84,10 @@ def compute_vwap(df: pd.DataFrame) -> pd.DataFrame:
     Missing values are derived; the result is NaN when volume is zero.
     """
     df = df.copy()
-    amount = df["amount"].to_numpy(dtype=np.float64, copy=False)
+    amount = (
+        df["amount"].to_numpy(dtype=np.float64, copy=False)
+        if "amount" in df.columns else np.full(len(df), np.nan, dtype=np.float64)
+    )
     volume = df["volume"].to_numpy(dtype=np.float64, copy=False)
     vwap = np.full(len(df), np.nan, dtype=np.float64)
     np.divide(amount, volume, out=vwap, where=volume > 0)

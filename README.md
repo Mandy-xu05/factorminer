@@ -81,6 +81,13 @@ Input panels require:
 datetime, asset_id, open, high, low, close, volume, amount
 ```
 
+When vendor VWAP is supplied, `amount` is optional. The loader accepts `vol`
+for `volume`, `date` for `datetime`, and `code` for `asset_id`. It also reads a
+directory containing `open.parquet`, `close.parquet`, `high.parquet`,
+`low.parquet`, `vol.parquet`, and `vwap.parquet`, each with `date/code/value`
+columns. An optional separate daily-return Parquet directory can supply labels;
+see [external daily returns](docs/reproducibility.md#external-daily-returns).
+
 Validate a panel, then recompute a saved library on it:
 
 ```bash

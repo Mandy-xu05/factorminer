@@ -1,19 +1,34 @@
-data_path: "./data/my_daily.csv"
-output_dir: "./output/my_5d_run"
+data_path: "D:/shc_xzx/data/daily_data"
+output_dir: "./output/my_daily_delay1_h5"
 
 data:
   market: "a_shares"  
   universe: "my_universe"
   frequency: "1d"
+  features: ["$open", "$close", "$high", "$low", "$volume", "$vwap"]
+  target_path: "D:/shc_xzx/data/daily_ret"
+  target_mode: "daily_return"
+  target_datetime_column: "date"
+  target_asset_column: "code"
+  target_columns:
+    future_5d: "value"
   train_period: ["2022-01-01", "2024-12-31"]
   test_period: ["2025-01-01", "2025-12-31"]
   targets:
     - name: "future_5d"
-      entry_delay_bars: 0
+      entry_delay_bars: 1
       holding_bars: 5
       price_pair: "close_to_close"
       return_transform: "simple"
   default_target: "future_5d"
+
+# Preserve raw daily prices and vendor VWAP. Future labels are never filled.
+preprocess:
+  standardise: false
+  winsor_lower: 0
+  winsor_upper: 100
+  cross_fill_method: "none"
+  features_to_standardise: ["open", "close", "high", "low", "volume", "vwap"]
 
 llm:
   provider: "deepseek"

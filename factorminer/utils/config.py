@@ -132,6 +132,12 @@ class DataConfig:
         ]
     )
     default_target: str = "paper"
+    # Optional long-form file of forward labels, already aligned to signal dates.
+    target_path: str | None = None
+    target_mode: str = "forward_return"
+    target_datetime_column: str = "datetime"
+    target_asset_column: str = "asset_id"
+    target_columns: dict[str, str] = field(default_factory=dict)
     # Declared data provenance (see DatasetContract). Undeclared values keep
     # historical campaign identity unchanged.
     source_version: str = ""
@@ -201,6 +207,31 @@ class DataConfig:
             raise ValueError("data.targets names must be unique")
         if self.default_target not in set(target_names):
             raise ValueError("data.default_target must match one of data.targets[*].name")
+        if bool(self.target_path) != bool(self.target_columns):
+            raise ValueError("data.target_path and data.target_columns must be configured together")
+        if self.target_mode not in {"forward_return", "daily_return"}:
+            raise ValueError("data.target_mode must be forward_return or daily_return")
+        if self.target_mode == "daily_return":
+            if not self.target_path or self.frequency != "1d":
+                raise ValueError("daily_return targets require target_path and frequency: 1d")
+            if any(t.get("price_pair") != "close_to_close" for t in self.targets):
+                raise ValueError("daily_return targets require close_to_close price pairs")
+            if any(int(t.get("holding_bars", 0)) < 1 for t in self.targets):
+                raise ValueError("daily_return targets require holding_bars >= 1")
+        if self.target_path:
+            if set(self.target_columns) != set(target_names):
+                raise ValueError("data.target_columns must map every configured target name")
+            columns = list(self.target_columns.values())
+            keys = [self.target_datetime_column, self.target_asset_column]
+            if not all(isinstance(c, str) and c.strip() for c in [*keys, *columns]):
+                raise ValueError("External target column names must be non-empty strings")
+            if len(set(keys)) != 2 or set(keys).intersection(columns):
+                raise ValueError("External target keys must be distinct from value columns")
+            forbidden = set(columns) | {
+                "target" if name == "paper" else f"target_{name}" for name in target_names
+            }
+            if forbidden.intersection(str(f).lstrip("$") for f in self.features):
+                raise ValueError("External forward labels cannot be used as input features")
 
 
 @dataclass
@@ -842,6 +873,9 @@ class Config:
     def to_dict(self) -> dict[str, Any]:
         """Serialize config to a plain dictionary."""
         payload = asdict(self)
+        if not self.data.target_path and not self.data.target_columns:
+            for key in ("target_path", "target_mode", "target_columns", "target_datetime_column", "target_asset_column"):
+                payload["data"].pop(key, None)
         # Default preprocessing is omitted so configs that never declared it
         # keep their historical campaign and config digests.
         if self.preprocess == PreprocessConfig():

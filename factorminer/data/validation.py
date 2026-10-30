@@ -167,8 +167,11 @@ def validate_market_data(
         )
         canonical_df["asset_id"] = asset_values
 
-    for col in REQUIRED_COLUMNS:
+    numeric_columns = [*REQUIRED_COLUMNS, *(["vwap"] if "vwap" in canonical_df else [])]
+    for col in numeric_columns:
         if col in {"datetime", "asset_id"}:
+            continue
+        if col == "amount" and col not in canonical_df and "vwap" in canonical_df:
             continue
         if col in canonical_df.columns:
             numeric_values = pd.to_numeric(canonical_df[col], errors="coerce")
@@ -381,6 +384,8 @@ def render_validation_report(report: DataValidationReport, strict: bool = False)
 
 
 def _infer_format(path: Path) -> FileFormat:
+    if path.is_dir():
+        return "parquet"
     suffix = path.suffix.lower()
     mapping: dict[str, FileFormat] = {
         ".csv": "csv",
@@ -398,6 +403,10 @@ def _infer_format(path: Path) -> FileFormat:
 
 
 def _read_raw_frame(path: Path, fmt: FileFormat, hdf_key: str = "data") -> pd.DataFrame:
+    if path.is_dir():
+        from factorminer.data.loader import read_market_directory
+
+        return read_market_directory(path)
     if fmt == "csv":
         return pd.read_csv(path)
     if fmt == "parquet":
@@ -439,6 +448,11 @@ def _build_canonical_mapping(
         else:
             missing.append(canonical)
 
+    vwap_sources = normalized_sources.get("vwap", [])
+    if vwap_sources:
+        mapping["vwap"] = vwap_sources[0]
+        if "amount" in missing:
+            missing.remove("amount")
     return mapping, ambiguous, missing
 
 

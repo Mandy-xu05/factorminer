@@ -7,6 +7,7 @@ memory signals, library state, and output format instructions.
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from factorminer.core.types import (
@@ -118,7 +119,7 @@ def build_system_prompt(
     """
     feature_block = _format_feature_list(features)
     framing = _asset_class_framing(asset_class)
-    return f"""{framing}
+    prompt = f"""{framing}
 
 Your goal is to generate novel, predictive factor expressions using a tree-structured domain-specific language (DSL). Each factor is a composition of operators applied to raw market features.
 
@@ -164,6 +165,21 @@ Your goal is to generate novel, predictive factor expressions using a tree-struc
 - Factors with depth 3-7 tend to be best: deep enough to capture non-trivial patterns but not so deep they overfit.
 - Prefer economically meaningful combinations over random nesting.
 """
+    if features is not None:
+        allowed = set(features)
+        lines = []
+        skip_explanation = False
+        for line in prompt.splitlines():
+            if skip_explanation and line.startswith("  ") and "$" not in line:
+                continue
+            skip_explanation = False
+            if set(re.findall(r"\$[A-Za-z_]\w*", line)) - allowed:
+                skip_explanation = line.startswith("- ")
+                continue
+            lines.append(line)
+        prompt = "\n".join(lines)
+        prompt += "\nUse only the listed RAW FEATURES. Forward returns are evaluation labels, never inputs.\n"
+    return prompt
 
 
 # ---------------------------------------------------------------------------
@@ -241,6 +257,41 @@ class PromptBuilder:
     @property
     def system_prompt(self) -> str:
         return self._system_prompt
+
+    @property
+    def allowed_features(self) -> list[str] | None:
+        return self._features
+
+    @classmethod
+    def from_data_config(cls, data_config: Any) -> PromptBuilder:
+        """Pin generation to the campaign's actual features, frequency and targets."""
+        if data_config is None:
+            return cls()
+        builder = cls(features=list(data_config.features),
+                      asset_class=getattr(data_config, "asset_class", None))
+        context = ["\n## ACTIVE PREDICTION TASK",
+                   f"Input bar frequency: {data_config.frequency}. All windows count input bars.",
+                   "A factor at time T may use only information available by T.",
+                   f"Default evaluation target: {data_config.default_target}."]
+        for target in data_config.targets:
+            delay = int(target.get("entry_delay_bars", 0))
+            horizon = int(target.get("holding_bars", 1))
+            pair = target.get("price_pair", "open_to_close")
+            end = delay + horizon - (1 if pair == "open_to_close" else 0)
+            start_price, end_price = pair.split("_to_")
+            context.append(
+                f"Target {target['name']}: {horizon} bars, entry delay {delay}; "
+                f"{start_price}[T+{delay}] to {end_price}[T+{end}], "
+                f"{target.get('return_transform', 'simple')} return."
+            )
+            if getattr(data_config, "target_mode", "forward_return") == "daily_return":
+                context.append(
+                    f"Daily return r[D] is close[D]/close[D-1]-1; "
+                    f"compound (1+r[T+k]) for k={delay + 1}..{end}, then subtract 1. "
+                    "These future returns are labels only."
+                )
+        builder._system_prompt += "\n".join(context)
+        return builder
 
     def build_user_prompt(
         self,

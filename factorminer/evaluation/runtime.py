@@ -313,7 +313,16 @@ def load_runtime_dataset(
     # quality check must not be skipped over by a forward-return offset.
     kept = raw_df["datetime"].isin(processed_df["datetime"].unique())
     target_input = raw_df if kept.all() else raw_df[kept]
-    target_df = compute_targets(target_input, target_specs)
+    external_target_path = getattr(cfg.data, "target_path", None)
+    if external_target_path:
+        from factorminer.data.targets import load_external_targets
+
+        # Keep the original trading calendar when compounding daily returns;
+        # a removed market date must not silently become a longer horizon.
+        target_df = load_external_targets(raw_df, cfg.data, target_specs)
+        target_df = target_df[target_df["datetime"].isin(processed_df["datetime"].unique())]
+    else:
+        target_df = compute_targets(target_input, target_specs)
     target_columns = [spec.column_name for spec in target_specs]
     merge_columns = ["datetime", "asset_id", *target_columns]
     universe_mask = _universe_mask(target_input, target_df)
@@ -355,6 +364,15 @@ def load_runtime_dataset(
         "feature_columns": list(feature_columns),
         "tensor": {"backend": "numpy", "dtype": "float64"},
     }
+    if external_target_path:
+        preprocessing["external_targets"] = {
+            "path": str(external_target_path),
+            "mode": cfg.data.target_mode,
+            "datetime_column": cfg.data.target_datetime_column,
+            "asset_column": cfg.data.target_asset_column,
+            "columns": dict(cfg.data.target_columns),
+            "alignment": "date_asset_id; daily_return rows end on their date",
+        }
     if universe_mask is not None:
         # Recorded only when present, so panels without a mask keep their digest.
         preprocessing["universe_mask"] = UNIVERSE_MASK_COLUMN

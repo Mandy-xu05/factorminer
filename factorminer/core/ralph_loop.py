@@ -183,7 +183,7 @@ class RalphLoop:
         )
         self.generator = FactorGenerator(
             llm_provider=llm_provider or MockProvider(),
-            prompt_builder=PromptBuilder(),
+            prompt_builder=PromptBuilder.from_data_config(getattr(config, "data", None)),
             temperature=getattr(getattr(config, "llm", None), "temperature", 0.8),
             max_tokens=getattr(getattr(config, "llm", None), "max_tokens", 4096),
         )

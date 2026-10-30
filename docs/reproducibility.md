@@ -12,6 +12,13 @@ The normalized panel requires:
 datetime, asset_id, open, high, low, close, volume, amount
 ```
 
+`amount` may be omitted when the panel supplies vendor `vwap`; the loader does
+not invent turnover from volume with unknown units. `date`, `code`, and `vol`
+are accepted aliases. A market directory can contain separate `open`, `high`,
+`low`, `close`, `vol`, and `vwap` Parquet files (or subdirectories), each in
+long form with `date`, `code`, and `value`. File names are matched to fields,
+and date/code keys are outer-aligned before normal validation.
+
 Identifier aliases include `code`, `ticker`, `symbol`, and `ts_code`; `amt`
 aliases `amount`. The loader sorts by asset/time and validates numeric fields.
 It can derive `vwap = amount / volume` and per-asset close returns. Derived
@@ -27,6 +34,28 @@ analysis shares the `EvaluationDataset` split model. Freeze admission, model
 fitting, factor weights, hyperparameters, and direction upstream of test data.
 The CLI action lane also purges forward-target overlap from the training end.
 Array callers own alignment, discovery-only slicing, and feature availability.
+
+### External daily returns
+
+For an external daily-return directory or file, set `data.target_path`,
+`data.target_mode: daily_return`, `data.target_datetime_column`,
+`data.target_asset_column`, and `data.target_columns` mapping target names to
+return columns. Each return is a decimal close-to-close return ending on its
+own date; `0.01` means 1%. The input must have one row per date and asset.
+Missing return days remain missing and invalidate every overlapping compound
+label. The external return is kept out of the factor input features.
+
+For `frequency: 1d`, `price_pair: close_to_close`, `entry_delay_bars: 1`, and
+`holding_bars: 5`, the label at T is
+`(1+r[T+2])*(1+r[T+3])*...*(1+r[T+6])-1` (the five daily intervals from
+the close of T+1 through the close of T+6). The mining train split purges
+`entry_delay_bars + holding_bars` rows at its end, six in this example, so
+training labels cannot use prices or returns from the held-out period.
+
+The local example `my_5d_dsk.yaml` uses these settings. Its paths and
+train/test dates must match the actual files before running. Check the market
+directory with `factorminer validate-data <market-directory> --strict` before
+starting a campaign. A live DeepSeek campaign also requires `DEEPSEEK_API_KEY`.
 
 The [bundled sample](../data/README.md) has a matching configuration and provenance
 manifest. Public-data specifications and checksum locks live in

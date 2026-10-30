@@ -228,6 +228,12 @@ class FactorGenerator:
                     len(valid),
                 )
 
+        allowed = self.prompt_builder.allowed_features
+        if allowed is not None:
+            valid = [candidate for candidate in valid
+                     if candidate.expression_tree is not None
+                     and set(candidate.expression_tree.leaf_features()) <= set(allowed)]
+
         # 5. Log summary
         if valid:
             categories = {}
